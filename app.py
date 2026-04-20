@@ -56,6 +56,10 @@ def init_state() -> None:
         st.session_state.favorite_queries = []
     if "favorite_name" not in st.session_state:
         st.session_state.favorite_name = ""
+    if "assistant_pending_prompt" not in st.session_state:
+        st.session_state.assistant_pending_prompt = None
+    if "assistant_pending_sql" not in st.session_state:
+        st.session_state.assistant_pending_sql = None
 
 
 def call_sql_api(sql_text: str) -> tuple[Any, Any, str | None]:
@@ -84,7 +88,7 @@ def call_sql_api(sql_text: str) -> tuple[Any, Any, str | None]:
         return None, None, f"Falha ao chamar API SQL ({url}): {exc}"
 
 
-def call_assistant_api(prompt: str, current_sql: str) -> tuple[str | None, str | None]:
+def call_assistant_api(prompt: str, current_sql: str) -> tuple[str | None, dict[str, Any] | None, str | None]:
     url = f"{API_BASE_URL.rstrip('/')}/assistant/suggest"
     try:
         response = requests.post(
@@ -100,24 +104,25 @@ def call_assistant_api(prompt: str, current_sql: str) -> tuple[str | None, str |
                 suggestion = data.get("suggestion")
                 if not suggestion:
                     suggestion = "A API respondeu sem sugestão de SQL."
-                return suggestion, None
+                metadata_context = data.get("metadataContext")
+                return suggestion, metadata_context, None
 
             error = payload.get("error") or {}
             message = error.get("message") or "Erro retornado pela API do assistente."
             code = error.get("code")
             detail = f"{code}: {message}" if code else message
-            return None, detail
+            return None, None, detail
 
         # Fallback legado
         response.raise_for_status()
         suggestion = payload.get("suggestion") or payload.get("sql")
         if not suggestion:
             suggestion = "A API respondeu, mas não retornou `suggestion` nem `sql`."
-        return suggestion, None
+        return suggestion, None, None
     except ValueError:
-        return None, f"Falha ao interpretar resposta JSON da API do assistente ({url})."
+        return None, None, f"Falha ao interpretar resposta JSON da API do assistente ({url})."
     except requests.RequestException as exc:
-        return None, f"Falha ao chamar API do assistente ({url}): {exc}"
+        return None, None, f"Falha ao chamar API do assistente ({url}): {exc}"
 
 
 def normalize_to_dataframe(payload: Any) -> pd.DataFrame:
@@ -288,12 +293,12 @@ def apply_styles() -> None:
                 overflow: hidden;
             }
             [data-testid="stChatMessage"] {
-                margin-bottom: 0.55rem;
-                padding: 0.55rem 0.65rem;
+                margin-bottom: 0.82rem;
+                padding: 0.78rem 0.9rem;
                 border: 1px solid #c8d9ea;
                 border-radius: 14px;
                 background: #f5f9ff;
-                align-items: center !important;
+                align-items: flex-start !important;
             }
             [data-testid="stChatMessageContent"] {
                 border: none !important;
@@ -316,8 +321,8 @@ def apply_styles() -> None:
                 overflow: visible !important;
             }
             [data-testid="stChatMessage"] [data-testid="stMarkdownContainer"] p {
-                line-height: 1.45;
-                margin: 0.1rem 0;
+                line-height: 1.58;
+                margin: 0.2rem 0;
             }
             [data-testid="stChatInput"] {
                 margin-top: 0.3rem;
@@ -418,23 +423,58 @@ def render_assistant() -> None:
         for msg in st.session_state.assistant_messages[-6:]:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
+                if msg["role"] == "assistant" and msg.get("metadata_context"):
+                    st.json(msg["metadata_context"])
 
-        prompt = st.chat_input("Ex.: trazer receita por mês dos últimos 12 meses")
-        if prompt:
-            st.session_state.assistant_messages.append({"role": "user", "content": prompt})
+        if st.session_state.assistant_pending_prompt:
+            with st.chat_message("assistant"):
+                st.markdown("_Processando resposta..._")
             with st.spinner("Consultando assistente..."):
-                suggestion, err = call_assistant_api(
-                    prompt,
-                    st.session_state.sql_text,
+                suggestion, metadata_context, err = call_assistant_api(
+                    st.session_state.assistant_pending_prompt,
+                    st.session_state.assistant_pending_sql or st.session_state.sql_text,
                 )
             if err:
                 st.session_state.assistant_messages.append({"role": "assistant", "content": err})
             else:
-                st.session_state.assistant_messages.append({"role": "assistant", "content": suggestion or ""})
+                if metadata_context:
+                    st.session_state.assistant_messages.append(
+                        {
+                            "role": "assistant",
+                            "content": "Retorno do MetadataRetrievalService:",
+                            "metadata_context": metadata_context,
+                            "message_type": "metadata",
+                        }
+                    )
+                st.session_state.assistant_messages.append(
+                    {
+                        "role": "assistant",
+                        "content": suggestion or "",
+                        "message_type": "sql",
+                    }
+                )
+            st.session_state.assistant_pending_prompt = None
+            st.session_state.assistant_pending_sql = None
+            st.rerun()
+
+        prompt = st.chat_input("Ex.: trazer receita por mês dos últimos 12 meses")
+        if prompt:
+            st.session_state.assistant_messages.append({"role": "user", "content": prompt})
+            st.session_state.assistant_pending_prompt = prompt
+            st.session_state.assistant_pending_sql = st.session_state.sql_text
+            st.rerun()
 
         if st.button("Usar última sugestão no editor", use_container_width=True):
             for msg in reversed(st.session_state.assistant_messages):
-                if msg["role"] == "assistant" and msg["content"].strip():
+                if msg["role"] == "assistant" and msg.get("message_type") == "sql" and msg["content"].strip():
+                    st.session_state.sql_text = msg["content"]
+                    st.rerun()
+                if (
+                    msg["role"] == "assistant"
+                    and msg.get("message_type") is None
+                    and not msg.get("metadata_context")
+                    and msg["content"].strip()
+                ):
                     st.session_state.sql_text = msg["content"]
                     st.rerun()
 
