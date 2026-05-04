@@ -34,6 +34,22 @@ def resolve_api_base_url() -> str:
 API_BASE_URL = resolve_api_base_url()
 
 
+def resolve_assistant_timeout_seconds() -> int:
+    """LM Studio local pode levar mais tempo na primeira resposta (cold start)."""
+    default_timeout = 30
+    try:
+        if "assistant" in st.secrets and "timeout_seconds" in st.secrets["assistant"]:
+            return int(st.secrets["assistant"]["timeout_seconds"])
+        if "ASSISTANT_TIMEOUT_SECONDS" in st.secrets:
+            return int(st.secrets["ASSISTANT_TIMEOUT_SECONDS"])
+    except Exception:
+        pass
+    return default_timeout
+
+
+ASSISTANT_TIMEOUT_SECONDS = resolve_assistant_timeout_seconds()
+
+
 def init_state() -> None:
     if "sql_text" not in st.session_state:
         st.session_state.sql_text = DEFAULT_SQL
@@ -60,6 +76,14 @@ def init_state() -> None:
         st.session_state.assistant_pending_prompt = None
     if "assistant_pending_sql" not in st.session_state:
         st.session_state.assistant_pending_sql = None
+    if "assistant_provider" not in st.session_state:
+        st.session_state.assistant_provider = "lmstudio"
+    if "assistant_metadata_provider" not in st.session_state:
+        st.session_state.assistant_metadata_provider = "askdata_like"
+    if "assistant_query_understanding_engine" not in st.session_state:
+        st.session_state.assistant_query_understanding_engine = "auto"
+    if "assistant_enable_sql_guard" not in st.session_state:
+        st.session_state.assistant_enable_sql_guard = True
 
 
 def call_sql_api(sql_text: str) -> tuple[Any, Any, str | None]:
@@ -88,13 +112,27 @@ def call_sql_api(sql_text: str) -> tuple[Any, Any, str | None]:
         return None, None, f"Falha ao chamar API SQL ({url}): {exc}"
 
 
-def call_assistant_api(prompt: str, current_sql: str) -> tuple[str | None, dict[str, Any] | None, str | None]:
+def call_assistant_api(
+    prompt: str,
+    current_sql: str,
+    provider: str,
+    metadata_provider: str,
+    query_understanding_engine: str,
+    enable_sql_guard: bool,
+) -> tuple[str | None, dict[str, Any] | None, dict[str, Any] | None, str | None]:
     url = f"{API_BASE_URL.rstrip('/')}/assistant/suggest"
     try:
         response = requests.post(
             url,
-            json={"prompt": prompt, "currentSql": current_sql},
-            timeout=30,
+            json={
+                "prompt": prompt,
+                "currentSql": current_sql,
+                "provider": provider,
+                "metadataProvider": metadata_provider,
+                "queryUnderstandingEngine": query_understanding_engine,
+                "enableSqlGuard": enable_sql_guard,
+            },
+            timeout=ASSISTANT_TIMEOUT_SECONDS,
         )
         payload = response.json()
 
@@ -105,24 +143,25 @@ def call_assistant_api(prompt: str, current_sql: str) -> tuple[str | None, dict[
                 if not suggestion:
                     suggestion = "A API respondeu sem sugestão de SQL."
                 metadata_context = data.get("metadataContext")
-                return suggestion, metadata_context, None
+                sql_validation = data.get("sqlValidation")
+                return suggestion, metadata_context, sql_validation, None
 
             error = payload.get("error") or {}
             message = error.get("message") or "Erro retornado pela API do assistente."
             code = error.get("code")
             detail = f"{code}: {message}" if code else message
-            return None, None, detail
+            return None, None, None, detail
 
         # Fallback legado
         response.raise_for_status()
         suggestion = payload.get("suggestion") or payload.get("sql")
         if not suggestion:
             suggestion = "A API respondeu, mas não retornou `suggestion` nem `sql`."
-        return suggestion, None, None
+        return suggestion, None, None, None
     except ValueError:
-        return None, None, f"Falha ao interpretar resposta JSON da API do assistente ({url})."
+        return None, None, None, f"Falha ao interpretar resposta JSON da API do assistente ({url})."
     except requests.RequestException as exc:
-        return None, None, f"Falha ao chamar API do assistente ({url}): {exc}"
+        return None, None, None, f"Falha ao chamar API do assistente ({url}): {exc}"
 
 
 def normalize_to_dataframe(payload: Any) -> pd.DataFrame:
@@ -419,6 +458,49 @@ def render_assistant() -> None:
             '<div class="card-caption">Descreva em linguagem natural e receba sugestão de SQL da sua API.</div>',
             unsafe_allow_html=True,
         )
+        provider_col, metadata_col, understanding_col, guard_col = st.columns([1.0, 1.2, 1.2, 1.4], gap="small")
+        with provider_col:
+            provider_options = ["lmstudio", "openai"]
+            current_provider = st.session_state.assistant_provider
+            if current_provider not in provider_options:
+                current_provider = "lmstudio"
+            selected_provider = st.selectbox(
+                "LLM",
+                options=provider_options,
+                index=provider_options.index(current_provider),
+                key="assistant_provider_select",
+            )
+            st.session_state.assistant_provider = selected_provider
+        with metadata_col:
+            metadata_options = ["askdata_like"]
+            current_metadata_provider = st.session_state.assistant_metadata_provider
+            if current_metadata_provider not in metadata_options:
+                current_metadata_provider = "askdata_like"
+            selected_metadata_provider = st.selectbox(
+                "Metadata Retrieval",
+                options=metadata_options,
+                index=metadata_options.index(current_metadata_provider),
+                key="assistant_metadata_provider_select",
+            )
+            st.session_state.assistant_metadata_provider = selected_metadata_provider
+        with understanding_col:
+            understanding_options = ["auto", "opennlp", "heuristic"]
+            current_understanding_engine = st.session_state.assistant_query_understanding_engine
+            if current_understanding_engine not in understanding_options:
+                current_understanding_engine = "auto"
+            selected_understanding_engine = st.selectbox(
+                "Understanding",
+                options=understanding_options,
+                index=understanding_options.index(current_understanding_engine),
+                key="assistant_query_understanding_engine_select",
+            )
+            st.session_state.assistant_query_understanding_engine = selected_understanding_engine
+        with guard_col:
+            st.session_state.assistant_enable_sql_guard = st.checkbox(
+                "Habilitar SqlGuardService",
+                value=st.session_state.assistant_enable_sql_guard,
+                help="Desative para ver o SQL bruto gerado pela IA, mesmo se o guard bloquearia.",
+            )
 
         for msg in st.session_state.assistant_messages[-6:]:
             with st.chat_message(msg["role"]):
@@ -430,9 +512,13 @@ def render_assistant() -> None:
             with st.chat_message("assistant"):
                 st.markdown("_Processando resposta..._")
             with st.spinner("Consultando assistente..."):
-                suggestion, metadata_context, err = call_assistant_api(
+                suggestion, metadata_context, sql_validation, err = call_assistant_api(
                     st.session_state.assistant_pending_prompt,
                     st.session_state.assistant_pending_sql or st.session_state.sql_text,
+                    st.session_state.assistant_provider,
+                    st.session_state.assistant_metadata_provider,
+                    st.session_state.assistant_query_understanding_engine,
+                    st.session_state.assistant_enable_sql_guard,
                 )
             if err:
                 st.session_state.assistant_messages.append({"role": "assistant", "content": err})
@@ -441,9 +527,18 @@ def render_assistant() -> None:
                     st.session_state.assistant_messages.append(
                         {
                             "role": "assistant",
-                            "content": "Retorno do MetadataRetrievalService:",
+                            "content": "Retorno do Metadata Context Service:",
                             "metadata_context": metadata_context,
                             "message_type": "metadata",
+                        }
+                    )
+                if sql_validation:
+                    st.session_state.assistant_messages.append(
+                        {
+                            "role": "assistant",
+                            "content": "Retorno do SqlGuardService:",
+                            "metadata_context": sql_validation,
+                            "message_type": "sql_guard",
                         }
                     )
                 st.session_state.assistant_messages.append(
