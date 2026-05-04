@@ -31,7 +31,7 @@ O frontend está preparado para chamar:
   ```json
   { "sql": "SELECT * FROM tabela" }
   ```
-- `POST /assistant/suggest` com payload:
+- `POST /assistant/text-to-sql-query` com payload:
   ```json
   {
     "prompt": "quero top 10 clientes",

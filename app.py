@@ -120,7 +120,7 @@ def call_assistant_api(
     query_understanding_engine: str,
     enable_sql_guard: bool,
 ) -> tuple[str | None, dict[str, Any] | None, dict[str, Any] | None, str | None]:
-    url = f"{API_BASE_URL.rstrip('/')}/assistant/suggest"
+    url = f"{API_BASE_URL.rstrip('/')}/assistant/text-to-sql-query"
     try:
         response = requests.post(
             url,
