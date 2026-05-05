@@ -651,7 +651,7 @@ def main() -> None:
     apply_styles()
     render_header()
 
-    col_sql, col_ai = st.columns([2.05, 1.15], gap="medium")
+    col_sql, col_ai = st.columns([1.5, 1.5], gap="medium")
     with col_sql:
         render_sql_editor()
     with col_ai:
